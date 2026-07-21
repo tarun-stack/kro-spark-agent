@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kro-spark-agent
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-jobs

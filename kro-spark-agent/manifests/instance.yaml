@@ -1,0 +1,34 @@
+apiVersion: kro.run/v1alpha1
+kind: SparkHealingAgent
+metadata:
+  name: spark-healer
+  namespace: kro-spark-agent
+spec:
+  sparkNamespace: spark-jobs
+  pollIntervalSeconds: 60
+  maxExecutors: 6
+  maxRestarts: 3
+  restartWindowSeconds: 3600
+  openaiModel: gpt-4o
+  approvalEmailTo: "tarunximb33@gmail.com"
+  # Requires: kubectl port-forward svc/spark-healer-approval 8090:8090 -n kro-spark-agent
+  approvalLinkBase: "http://localhost:8090"
+  # Company M365 tenant (smtp.office365.com) has SMTP AUTH disabled
+  # tenant-wide ("SmtpClientAuthentication is disabled for the Tenant") —
+  # confirmed against the live tenant, not just a guess. Falling back to
+  # Gmail (defaults below) for just this channel.
+  smtpHost: "smtp.gmail.com"
+  smtpPort: 587
+  credentials:
+    secretName: healing-agent-credentials
+  proxy:
+    mode: allow-everything
+    domains:
+      - host: api.openai.com
+        inject_header: Authorization
+        inject_header_prefix: "Bearer "
+        credential_env: OPENAI_API_KEY
+  remediation:
+    enabled: true
+    repoMapJson: '{"test-failing-job": "tarun-stack/ai-poc"}'
+    credentialsSecretName: remediation-credentials

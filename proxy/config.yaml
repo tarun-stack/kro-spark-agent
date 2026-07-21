@@ -1,0 +1,29 @@
+# Transparent proxy configuration
+# This file is deployed via ConfigMap (see manifests/configmap.yaml)
+#
+# Operating mode:
+#   strict           - only allow domains in the list, block everything else (default)
+#   allow-everything - credential-replace listed domains, pass through all other traffic
+#   block-unknown    - allow all detectable traffic, block only unidentifiable connections
+#
+# mode: strict
+#
+# Domain defaults: port=443, action=credential-replace
+# Only specify port/action when overriding the defaults.
+
+domains:
+  - host: api.anthropic.com
+    inject_header: x-api-key
+    credential_env: ANTHROPIC_API_KEY
+
+  - host: github.com
+    inject_auth: basic
+    credential_env: GH_TOKEN
+
+  - host: api.github.com
+    inject_auth: basic
+    credential_env: GH_TOKEN
+
+  # Example: passthrough (no credential injection)
+  # - host: registry.npmjs.org
+  #   action: passthrough

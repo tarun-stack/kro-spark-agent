@@ -1,0 +1,555 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: sparkhealingagent
+  annotations:
+    kro.run/allow-breaking-changes: "true"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: SparkHealingAgent
+
+    types:
+      Domain:
+        host: string | required=true
+        port: integer | default=443
+        action: 'string | default="credential-replace"'
+        inject_header: string | default=""
+        inject_header_prefix: string | default=""
+        inject_auth: string | default=""
+        credential_env: string | default=""
+
+    spec:
+      sparkNamespace: 'string | default="spark-jobs" description="Namespace holding the SparkApplication CRs to watch and heal"'
+      pollIntervalSeconds: integer | default=180 description="How often the healing agent lists SparkApplications for failures"
+      maxExecutors: integer | default=10 description="Hard cap on executor.instances a scale action may reach"
+      maxRestarts: integer | default=3 description="Hard cap on restarts per app within restartWindowSeconds"
+      restartWindowSeconds: integer | default=3600
+      openaiModel: string | default="gpt-4o" description="Model used for the diagnosis call"
+      approvalEmailTo: string | required=true description="Where approve/reject links for restart/scale actions are emailed"
+      approvalLinkBase: 'string | default="http://localhost:8090" description="Externally-reachable base URL for approval links (see README: kubectl port-forward)"'
+      smtpHost: string | default="smtp.gmail.com" description="SMTP server for approval emails, e.g. smtp.office365.com for Microsoft 365"
+      smtpPort: integer | default=587
+      credentials:
+        secretName: string | required=true description="Secret with OPENAI_API_KEY, SMTP_USER, SMTP_PASSWORD"
+      proxy:
+        mode: 'string | default="allow-everything" description="credential-replace listed domains (api.openai.com); pass everything else through untouched. strict is unsafe here because the agent also needs the in-cluster Kubernetes API, the actuator Service, and SMTP, none of which present a matchable hostname/SNI the way external HTTPS APIs do."'
+        domains: "[]Domain"
+      remediation:
+        enabled: boolean | default=false description="Hand off config_change/code_fix diagnoses to a PR-opening remediation agent instead of dropping them"
+        repoMapJson: 'string | default="{}" description="JSON object mapping SparkApplication name -> owner/repo"'
+        credentialsSecretName: string | default="" description="Secret with OPENAI_API_KEY and GITHUB_TOKEN; required when remediation.enabled is true"
+
+    status:
+      actuatorServiceName: ${actuatorService.metadata.name}
+      healingAgentDeploymentName: ${healingAgentDeployment.metadata.name}
+
+  resources:
+
+    # --- 1. ConfigMap: proxy configuration for the healing-agent's egress ---
+    - id: proxyConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-proxy-config
+          namespace: ${schema.metadata.namespace}
+        data:
+          config.yaml: |-
+            mode: ${schema.spec.proxy.mode}
+            domains: ${json.marshal(schema.spec.proxy.domains)}
+
+    # --- 2. RBAC: actuator — the ONLY identity with write access to SparkApplications ---
+    - id: actuatorSA
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${schema.metadata.name}-actuator
+          namespace: ${schema.metadata.namespace}
+
+    - id: actuatorRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${schema.metadata.name}-actuator
+          namespace: ${schema.spec.sparkNamespace}
+        rules:
+          - apiGroups: ["sparkoperator.k8s.io"]
+            resources: ["sparkapplications", "sparkapplications/status"]
+            verbs: ["get", "list", "watch", "patch", "delete"]
+
+    - id: actuatorRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${schema.metadata.name}-actuator
+          namespace: ${schema.spec.sparkNamespace}
+        subjects:
+          - kind: ServiceAccount
+            name: ${actuatorSA.metadata.name}
+            namespace: ${schema.metadata.namespace}
+        roleRef:
+          kind: Role
+          name: ${actuatorRole.metadata.name}
+          apiGroup: rbac.authorization.k8s.io
+
+    # --- 3. RBAC: healing agent — READ ONLY, can never mutate a SparkApplication ---
+    - id: healingAgentSA
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${schema.metadata.name}-healer
+          namespace: ${schema.metadata.namespace}
+
+    - id: healingAgentRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${schema.metadata.name}-healer
+          namespace: ${schema.spec.sparkNamespace}
+        rules:
+          - apiGroups: [""]
+            resources: ["pods", "pods/log", "events"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["sparkoperator.k8s.io"]
+            resources: ["sparkapplications", "sparkapplications/status"]
+            verbs: ["get", "list", "watch"]
+
+    - id: healingAgentRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${schema.metadata.name}-healer
+          namespace: ${schema.spec.sparkNamespace}
+        subjects:
+          - kind: ServiceAccount
+            name: ${healingAgentSA.metadata.name}
+            namespace: ${schema.metadata.namespace}
+        roleRef:
+          kind: Role
+          name: ${healingAgentRole.metadata.name}
+          apiGroup: rbac.authorization.k8s.io
+
+    # --- 4. Actuator Deployment + Service ---
+    - id: actuatorDeployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${schema.metadata.name}-actuator
+          namespace: ${schema.metadata.namespace}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: ${schema.metadata.name}-actuator
+          template:
+            metadata:
+              labels:
+                app: ${schema.metadata.name}-actuator
+            spec:
+              serviceAccountName: ${actuatorSA.metadata.name}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: actuator
+                  image: spark-actuator:latest
+                  imagePullPolicy: Never
+                  ports:
+                    - containerPort: 8080
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: SPARK_NAMESPACE
+                      value: ${schema.spec.sparkNamespace}
+                    - name: MAX_EXECUTORS
+                      value: ${string(schema.spec.maxExecutors)}
+                    - name: MAX_RESTARTS
+                      value: ${string(schema.spec.maxRestarts)}
+                    - name: RESTART_WINDOW_SECONDS
+                      value: ${string(schema.spec.restartWindowSeconds)}
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "256Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "512Mi"
+
+    - id: actuatorService
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.metadata.name}-actuator
+          namespace: ${schema.metadata.namespace}
+        spec:
+          selector:
+            app: ${actuatorDeployment.spec.selector.matchLabels.app}
+          ports:
+            - port: 8080
+              targetPort: 8080
+
+    # --- 5. NetworkPolicy: only the healing agent may reach the actuator ---
+    - id: actuatorNetworkPolicy
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: ${schema.metadata.name}-actuator-ingress
+          namespace: ${schema.metadata.namespace}
+        spec:
+          podSelector:
+            matchLabels:
+              app: ${actuatorDeployment.spec.selector.matchLabels.app}
+          policyTypes:
+            - Ingress
+          ingress:
+            - from:
+                - podSelector:
+                    matchLabels:
+                      app: ${schema.metadata.name}-healer
+              ports:
+                - protocol: TCP
+                  port: 8080
+
+    # --- 6. Healing agent Deployment (watch loop + diagnosis + email approval) ---
+    - id: healingAgentDeployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${schema.metadata.name}-healer
+          namespace: ${schema.metadata.namespace}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: ${schema.metadata.name}-healer
+          template:
+            metadata:
+              labels:
+                app: ${schema.metadata.name}-healer
+            spec:
+              serviceAccountName: ${healingAgentSA.metadata.name}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              volumes:
+                - name: proxy-certs
+                  emptyDir: {}
+                - name: proxy-config
+                  configMap:
+                    name: ${proxyConfig.metadata.name}
+
+              initContainers:
+                # NOTE: PROXY_PORT must match the proxy-sidecar containerPort
+                - name: iptables-init
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/app/iptables-init.sh"]
+                  securityContext:
+                    capabilities:
+                      add: ["NET_ADMIN"]
+                    runAsUser: 0
+                    runAsNonRoot: false
+                  env:
+                    - name: PROXY_PORT
+                      value: "15001"
+                    - name: PROXY_UID
+                      value: "1337"
+                  resources:
+                    requests:
+                      memory: "32Mi"
+                      cpu: "10m"
+                    limits:
+                      memory: "64Mi"
+                      cpu: "50m"
+
+                - name: cert-init
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/app/cert-init.sh"]
+                  securityContext:
+                    runAsUser: 0
+                    runAsNonRoot: false
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                  resources:
+                    requests:
+                      memory: "32Mi"
+                      cpu: "10m"
+                    limits:
+                      memory: "64Mi"
+                      cpu: "50m"
+
+                - name: proxy-sidecar
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  restartPolicy: Always
+                  securityContext:
+                    runAsUser: 1337
+                  env:
+                    - name: PROXY_PORT
+                      value: "15001"
+                    - name: OPENAI_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: OPENAI_API_KEY
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                    - name: proxy-config
+                      mountPath: /etc/proxy
+                  ports:
+                    - containerPort: 15001
+                      protocol: TCP
+                  startupProbe:
+                    exec:
+                      command: ["test", "-f", "/certs/proxy-ca.crt"]
+                    initialDelaySeconds: 1
+                    periodSeconds: 1
+                    failureThreshold: 10
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
+
+              containers:
+                - name: healing-agent
+                  image: spark-healing-agent:latest
+                  imagePullPolicy: Never
+                  ports:
+                    - containerPort: 8090
+                      name: approval
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: PYTHONUNBUFFERED
+                      value: "1"
+                    - name: OPENAI_API_KEY
+                      value: "FAKE_KEY_REPLACED_BY_PROXY"
+                    - name: NODE_EXTRA_CA_CERTS
+                      value: "/certs/proxy-ca.crt"
+                    - name: SSL_CERT_FILE
+                      value: "/certs/combined-ca.crt"
+                    - name: OPENAI_MODEL
+                      value: ${schema.spec.openaiModel}
+                    - name: SPARK_NAMESPACE
+                      value: ${schema.spec.sparkNamespace}
+                    - name: POLL_INTERVAL_SECONDS
+                      value: ${string(schema.spec.pollIntervalSeconds)}
+                    - name: ACTUATOR_URL
+                      value: http://${actuatorService.metadata.name}.${schema.metadata.namespace}.svc.cluster.local:8080
+                    - name: REMEDIATION_URL
+                      value: '${schema.spec.remediation.enabled ? "http://" + schema.metadata.name + "-remediation." + schema.metadata.namespace + ".svc.cluster.local:8080" : ""}'
+                    - name: SMTP_HOST
+                      value: ${schema.spec.smtpHost}
+                    - name: SMTP_PORT
+                      value: ${string(schema.spec.smtpPort)}
+                    - name: SMTP_USER
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: SMTP_USER
+                    - name: SMTP_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: SMTP_PASSWORD
+                    - name: APPROVAL_EMAIL_TO
+                      value: ${schema.spec.approvalEmailTo}
+                    - name: APPROVAL_LINK_BASE
+                      value: ${schema.spec.approvalLinkBase}
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                      readOnly: true
+                  resources:
+                    requests:
+                      cpu: "200m"
+                      memory: "256Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "512Mi"
+
+    # --- 7. Service: approval-link HTTP endpoint (port-forward to click links) ---
+    - id: healingAgentApprovalService
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.metadata.name}-approval
+          namespace: ${schema.metadata.namespace}
+        spec:
+          type: ClusterIP
+          selector:
+            app: ${healingAgentDeployment.spec.selector.matchLabels.app}
+          ports:
+            - port: 8090
+              targetPort: 8090
+
+    # --- 8. Remediation agent (optional): opens PRs for config_change/code_fix ---
+    - id: remediationRepoMap
+      includeWhen:
+        - ${schema.spec.remediation.enabled}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-remediation-repo-map
+          namespace: ${schema.metadata.namespace}
+        data:
+          repo-map.json: ${schema.spec.remediation.repoMapJson}
+
+    - id: remediationDeployment
+      includeWhen:
+        - ${schema.spec.remediation.enabled}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${schema.metadata.name}-remediation
+          namespace: ${schema.metadata.namespace}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: ${schema.metadata.name}-remediation
+          template:
+            metadata:
+              labels:
+                app: ${schema.metadata.name}-remediation
+            spec:
+              # Executes untrusted repo code (tests) — zero cluster credentials.
+              automountServiceAccountToken: false
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: remediation-agent
+                  image: spark-remediation-agent:latest
+                  imagePullPolicy: Never
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop: ["ALL"]
+                  ports:
+                    - containerPort: 8080
+                  env:
+                    - name: OPENAI_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.remediation.credentialsSecretName}
+                          key: OPENAI_API_KEY
+                    - name: GITHUB_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.remediation.credentialsSecretName}
+                          key: GITHUB_TOKEN
+                    - name: REPO_MAP_JSON
+                      valueFrom:
+                        configMapKeyRef:
+                          name: ${remediationRepoMap.metadata.name}
+                          key: repo-map.json
+                    - name: COOLDOWN_SECONDS
+                      value: "3600"
+                  volumeMounts:
+                    - name: work
+                      mountPath: /work
+                    - name: home
+                      mountPath: /home/agent
+                    - name: tmp
+                      mountPath: /tmp
+                  resources:
+                    requests:
+                      cpu: "500m"
+                      memory: "1Gi"
+                    limits:
+                      cpu: "2"
+                      memory: "2Gi"
+              volumes:
+                - name: work
+                  emptyDir:
+                    sizeLimit: 2Gi
+                - name: home
+                  emptyDir: {}
+                - name: tmp
+                  emptyDir: {}
+
+    - id: remediationService
+      includeWhen:
+        - ${schema.spec.remediation.enabled}
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.metadata.name}-remediation
+          namespace: ${schema.metadata.namespace}
+        spec:
+          selector:
+            app: ${schema.metadata.name}-remediation
+          ports:
+            - port: 8080
+              targetPort: 8080
+
+    - id: remediationNetworkPolicy
+      includeWhen:
+        - ${schema.spec.remediation.enabled}
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: ${schema.metadata.name}-remediation-policy
+          namespace: ${schema.metadata.namespace}
+        spec:
+          podSelector:
+            matchLabels:
+              app: ${schema.metadata.name}-remediation
+          policyTypes:
+            - Ingress
+            - Egress
+          ingress:
+            - from:
+                - podSelector:
+                    matchLabels:
+                      app: ${schema.metadata.name}-healer
+              ports:
+                - protocol: TCP
+                  port: 8080
+          egress:
+            - to: []
+              ports:
+                - protocol: UDP
+                  port: 53
+                - protocol: TCP
+                  port: 53
+            - to: []
+              ports:
+                - protocol: TCP
+                  port: 443

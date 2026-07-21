@@ -1,0 +1,248 @@
+================================================================================
+kro-spark-agent — Client Demo Runbook (from scratch)
+================================================================================
+Run these from the project root: C:\Users\tarun\k8-ai\kcd-new-york-k8s-claude
+Shell: Git Bash (or any POSIX-ish shell with kubectl/docker/kind/helm on PATH)
+
+Replace anything in <ANGLE_BRACKETS> with a real value before running.
+================================================================================
+
+
+--------------------------------------------------------------------------
+0. PREREQUISITES
+--------------------------------------------------------------------------
+# Docker Desktop must be running (kind runs cluster nodes as containers).
+docker info
+
+# If `kind` or `helm` are not already installed, grab standalone binaries
+# (no admin rights needed) — this repo used C:\Users\tarun\bin, already on PATH:
+mkdir -p /c/Users/tarun/bin
+curl -sSL -o /c/Users/tarun/bin/kind.exe https://kind.sigs.k8s.io/dl/v0.24.0/kind-windows-amd64
+curl -sSL -o /tmp/helm.zip https://get.helm.sh/helm-v3.15.4-windows-amd64.zip
+(cd /tmp && unzip -o helm.zip && cp windows-amd64/helm.exe /c/Users/tarun/bin/helm.exe)
+chmod +x /c/Users/tarun/bin/kind.exe /c/Users/tarun/bin/helm.exe
+export PATH="/c/Users/tarun/bin:$PATH"   # add this to every new shell session
+kind version
+helm version
+
+
+--------------------------------------------------------------------------
+1. CREATE THE KIND CLUSTER
+--------------------------------------------------------------------------
+kind create cluster --name claude-demo --wait 60s
+kubectl config current-context   # should print: kind-claude-demo
+
+
+--------------------------------------------------------------------------
+2. INSTALL KRO (the ResourceGraphDefinition controller)
+--------------------------------------------------------------------------
+helm install kro oci://registry.k8s.io/kro/charts/kro \
+  --namespace kro-system --create-namespace
+kubectl wait --for=condition=Available deploy -n kro-system --all --timeout=90s
+kubectl get pods -n kro-system
+
+
+--------------------------------------------------------------------------
+3. INSTALL THE SPARK OPERATOR
+--------------------------------------------------------------------------
+kubectl create namespace spark-jobs
+
+helm repo add spark-operator https://kubeflow.github.io/spark-operator
+helm repo update spark-operator
+
+# IMPORTANT: the value key is "spark.jobNamespaces" (nested), NOT
+# "sparkJobNamespaces" or top-level "jobNamespaces" — get this wrong and the
+# controller silently only watches the "default" namespace.
+helm install spark-operator spark-operator/spark-operator \
+  --namespace spark-jobs \
+  --version 2.5.1 \
+  --set "spark.jobNamespaces={spark-jobs}"
+
+kubectl wait --for=condition=Available deploy -n spark-jobs --all --timeout=90s
+kubectl get pods -n spark-jobs
+kubectl get crd | grep -i spark
+
+# Sanity check — must show "spark-jobs", not "default":
+kubectl get pods -n spark-jobs -l app.kubernetes.io/name=spark-operator \
+  -o jsonpath='{.items[0].spec.containers[0].args}' | tr ',' '\n' | grep namespaces
+
+# The chart auto-creates the driver ServiceAccount "spark-operator-spark"
+# with the RBAC Spark drivers need to launch executor pods. Verify it exists
+# (do NOT create it manually — that causes a Helm ownership conflict):
+kubectl get sa spark-operator-spark -n spark-jobs
+
+
+--------------------------------------------------------------------------
+4. BUILD THE IMAGES
+--------------------------------------------------------------------------
+docker build -t credential-proxy:latest --build-arg GOPROXY=direct proxy/
+docker build -t spark-healing-agent:latest kro-spark-agent/healing-agent/
+docker build -t spark-actuator:latest kro-spark-agent/actuator/
+docker build -t spark-remediation-agent:latest kro-spark-agent/remediation-agent/   # optional, only if using remediation
+
+
+--------------------------------------------------------------------------
+5. LOAD IMAGES INTO THE KIND CLUSTER
+--------------------------------------------------------------------------
+# kind runs its own containerd, separate from the host Docker daemon —
+# images must be explicitly loaded (unlike Docker Desktop's built-in k8s).
+kind load docker-image credential-proxy:latest spark-healing-agent:latest \
+  spark-actuator:latest spark-remediation-agent:latest --name claude-demo
+
+
+--------------------------------------------------------------------------
+6. NAMESPACES + THE ResourceGraphDefinition
+--------------------------------------------------------------------------
+kubectl apply -f kro-spark-agent/manifests/namespaces.yaml
+kubectl apply -f kro-spark-agent/manifests/rgd.yaml
+kubectl wait --for=condition=Ready rgd/sparkhealingagent --timeout=30s
+kubectl get crd sparkhealingagents.kro.run
+
+
+--------------------------------------------------------------------------
+7. SECRETS
+--------------------------------------------------------------------------
+# healing-agent-credentials: OpenAI key (used by the proxy sidecar for
+# diagnosis calls) + SMTP creds (used directly by the healing-agent
+# container for approval emails — SMTP isn't HTTP so the proxy can't
+# credential-replace it).
+#
+# Gmail: SMTP_PASSWORD must be an App Password
+#   (https://myaccount.google.com/apppasswords, needs 2FA on the account).
+# Microsoft 365 / company tenants: many have SMTP AUTH disabled entirely
+#   ("SmtpClientAuthentication is disabled for the Tenant") — if you hit
+#   that error, fall back to a Gmail account for this one channel; there is
+#   no code-side workaround for a tenant-level policy.
+
+kubectl create secret generic healing-agent-credentials \
+  -n kro-spark-agent \
+  --from-literal=OPENAI_API_KEY=<YOUR_OPENAI_API_KEY> \
+  --from-literal=SMTP_USER=<YOUR_GMAIL_ADDRESS> \
+  --from-literal=SMTP_PASSWORD=<YOUR_GMAIL_APP_PASSWORD_NO_SPACES>
+
+# remediation-credentials: only needed if spec.remediation.enabled: true.
+# GITHUB_TOKEN must be a fine-grained PAT scoped to ONLY
+# contents:write + pull_requests:write on the target repo — no workflow
+# scope, no org access. OPENAI_API_KEY drives the code-fix agent (a
+# first-party OpenAI tool-calling loop, not the Claude Agent SDK).
+
+kubectl create secret generic remediation-credentials \
+  -n kro-spark-agent \
+  --from-literal=OPENAI_API_KEY=<YOUR_OPENAI_API_KEY> \
+  --from-literal=GITHUB_TOKEN=<YOUR_FINE_GRAINED_GITHUB_PAT>
+
+
+--------------------------------------------------------------------------
+8. EDIT AND APPLY THE INSTANCE
+--------------------------------------------------------------------------
+# Open kro-spark-agent/manifests/instance.yaml and set:
+#   spec.approvalEmailTo     -> where you want approve/reject emails delivered
+#   spec.smtpHost/smtpPort   -> smtp.gmail.com:587 (default) or your provider
+#   spec.remediation.enabled -> true/false
+#   spec.remediation.repoMapJson -> {"<spark-app-name>": "<owner>/<repo>"}
+
+kubectl apply -f kro-spark-agent/manifests/instance.yaml
+kubectl wait --for=condition=Ready sparkhealingagent/spark-healer \
+  -n kro-spark-agent --timeout=60s
+kubectl get pods -n kro-spark-agent
+
+
+--------------------------------------------------------------------------
+9. PORT-FORWARD THE APPROVAL SERVICE (leave running in its own terminal)
+--------------------------------------------------------------------------
+kubectl port-forward svc/spark-healer-approval 8090:8090 -n kro-spark-agent
+# ^ keep this open for the whole demo — approve/reject email links point at
+#   http://localhost:8090 and need this tunnel to actually reach the pod.
+
+
+--------------------------------------------------------------------------
+10. TRIGGER A FAILURE (in a second terminal)
+--------------------------------------------------------------------------
+kubectl apply -f kro-spark-agent/manifests/test-jobs.yaml
+kubectl get sparkapplications -n spark-jobs -w
+# wait for STATUS to reach FAILED for test-failing-job / test-oom-job
+# (Ctrl-C once both show FAILED)
+
+
+--------------------------------------------------------------------------
+11. WATCH THE HEALING LOOP WORK
+--------------------------------------------------------------------------
+# Diagnosis + proposed action (poll cycle runs every spec.pollIntervalSeconds):
+kubectl logs -f -n kro-spark-agent -l app=spark-healer-healer -c healing-agent
+
+# Confirm only api.openai.com is credential-replaced; everything else
+# (Kubernetes API, actuator, SMTP) passes through untouched:
+kubectl logs -n kro-spark-agent -l app=spark-healer-healer -c proxy-sidecar --tail=20
+
+# If remediation.enabled — watch the code-fix -> PR flow:
+kubectl logs -f -n kro-spark-agent -l app=spark-healer-remediation
+
+# Click the approve/reject link in the email (needs step 9's port-forward
+# running), then confirm the actuator actually acted:
+kubectl logs -n kro-spark-agent -l app=spark-healer-actuator --tail=20
+kubectl get sparkapplications -n spark-jobs
+# test-oom-job should flip from FAILED -> RUNNING with more executors
+
+
+--------------------------------------------------------------------------
+12. VERIFY THE RBAC BOUNDARY (the whole point of the split)
+--------------------------------------------------------------------------
+kubectl auth can-i delete sparkapplications \
+  --as=system:serviceaccount:kro-spark-agent:spark-healer-healer \
+  -n spark-jobs
+# expect: no
+
+kubectl auth can-i delete sparkapplications \
+  --as=system:serviceaccount:kro-spark-agent:spark-healer-actuator \
+  -n spark-jobs
+# expect: yes
+
+
+================================================================================
+CLEANUP
+================================================================================
+kubectl delete -f kro-spark-agent/manifests/test-jobs.yaml
+kubectl delete sparkhealingagent spark-healer -n kro-spark-agent   # KRO garbage-collects all child resources
+kubectl delete -f kro-spark-agent/manifests/rgd.yaml
+helm uninstall spark-operator -n spark-jobs
+helm uninstall kro -n kro-system
+kubectl delete -f kro-spark-agent/manifests/namespaces.yaml
+
+# Nuke everything (fastest full reset before a re-run):
+kind delete cluster --name claude-demo
+
+
+================================================================================
+TROUBLESHOOTING NOTES (things that actually broke during setup)
+================================================================================
+- Spark Operator only watching "default": you set --set "jobNamespaces=..."
+  instead of --set "spark.jobNamespaces=...". Fix with `helm upgrade` using
+  the correct nested key, then delete/reapply the test SparkApplications.
+
+- "invalid ownership metadata" on `helm install spark-operator`: something
+  (you, a previous run) manually created serviceaccount/spark-operator-spark
+  outside Helm. Delete it (and any Role/RoleBinding you made for it) before
+  installing — the chart creates its own with correct labels.
+
+- Healing-agent pod stuck in Init:Error on iptables-init: CRLF line endings
+  in proxy/*.sh from a Windows checkout broke `set -euo pipefail`. Already
+  fixed in proxy/Dockerfile (strips \r at build time) — rebuild the image if
+  you still see this.
+
+- Any in-cluster HTTP call through the proxy sidecar (to the actuator or
+  remediation service) times out / hangs forever: this was a real bug in
+  proxy/main.go's extractHTTPHost() — br.Peek(4096) blocked indefinitely for
+  any HTTP request shorter than 4096 bytes (i.e. almost all of them), since
+  no read deadline was set. Already fixed (bounded with a 1s deadline,
+  same pattern as the TLS SNI peek) — rebuild credential-proxy:latest and
+  kind load it if you still see hangs.
+
+- SMTP login fails with "SmtpClientAuthentication is disabled for the
+  Tenant": your email provider (commonly M365) has basic SMTP AUTH turned
+  off tenant-wide. Not fixable from this code — either get an admin
+  exception ("Authenticated SMTP" in the Exchange admin center) or point
+  spec.smtpHost/smtpHost credentials at a personal Gmail account instead.
+
+- "Credit balance is too low" from the `claude` CLI or Anthropic API: this
+  system's OpenAI-based components (diagnosis, remediation) are unaffected
+  — this only matters if you reintroduce anything Anthropic-backed.
