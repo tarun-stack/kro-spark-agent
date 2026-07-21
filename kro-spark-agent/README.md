@@ -9,9 +9,10 @@ for the agent's one external API call.
 ## Concept Summary
 
 A `SparkApplication` fails. A **healing agent** (read-only Kubernetes RBAC) notices,
-pulls the driver logs, and asks an LLM to diagnose it. If the fix is a restart or an
-executor-count bump, it emails a human an approve/reject link — clicking it is the
-only way the action actually happens. If the fix looks like a code or config bug, it
+pulls the driver logs, and asks an LLM to diagnose it. If the fix is a restart, an
+executor-count bump, or an executor-memory bump, it emails a human an approve/reject
+link — clicking it is the only way the action actually happens. If the fix looks
+like a code or config bug, it
 hands the diagnosis to an optional **remediation agent**, which uses the Claude
 Agent SDK to patch the job's repo and open a PR; a human merging that PR is the
 approval gate for that path. Neither the healing agent nor the remediation agent can
@@ -41,10 +42,10 @@ flowchart TD
 
     spark -- "logs (read)" --> healer
     healer -- "diagnose" --> proxy --> openai
-    healer -- "restart/scale request" --> approvalSvc
+    healer -- "restart/scale/memory request" --> approvalSvc
     approvalSvc -- "click approve" --> human
     human -. "approve" .-> healer
-    healer -- "POST /restart /scale" --> actuator
+    healer -- "POST /restart /scale /increase-memory" --> actuator
     actuator -- "patch/delete" --> spark
     healer -- "config_change/code_fix" --> remediation
     remediation -- "clone, fix, PR" --> github
@@ -64,6 +65,7 @@ flowchart TD
 |---|---|---|
 | Hand-written Deployments, RBAC, NetworkPolicy, Secrets (10+ YAML files) | One `SparkHealingAgent` CR, expanded by a KRO `ResourceGraphDefinition` | Same "one CRD to rule them all" idea as concept 06 |
 | `kubernetes-mcp-server` (generic third-party MCP image) holds write RBAC | First-party `actuator/` FastAPI service holds write RBAC | Same least-privilege split (diagnose vs. act), no external image/protocol dependency — mirrors this repo's own small first-party services (`proxy/`, `remediation-agent/`) |
+| N/A (original only had restart/scale) | Added `increase_memory` action + `/increase-memory` actuator endpoint | An OOM caused by one executor's own task exceeding its heap isn't fixed by `scale` (more executors ≠ more memory per task). The diagnosis prompt now distinguishes the two failure signatures; the actuator enforces its own memory cap and ramp independently of the caller, same as `/scale` |
 | Diagnosis LLM: OpenAI `gpt-4o` | Unchanged — still OpenAI | Kept by design; only the Kubernetes/KRO shape changed, not the model backend |
 | Real `OPENAI_API_KEY` in the healing-agent container | `proxy/` sidecar injects it; container only ever sees `FAKE_KEY_REPLACED_BY_PROXY` | Reuses concept 03's transparent credential proxy instead of trusting the app container with the real key |
 | SMTP creds, actuator calls, Kubernetes API calls | Left un-intercepted (`proxy.mode: allow-everything`, only `api.openai.com` is credential-replaced) | The proxy can only match a hostname via TLS SNI or an HTTP Host header — SMTP (STARTTLS), the in-cluster actuator Service, and the in-cluster Kubernetes API don't present one the same way an external HTTPS API does. `NetworkPolicy` + RBAC are the real boundary for those, not the proxy allowlist |

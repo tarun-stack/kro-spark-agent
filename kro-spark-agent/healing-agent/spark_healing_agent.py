@@ -66,7 +66,7 @@ def get_spark_logs(app_name: str, namespace: str = SPARK_NAMESPACE):
     return "No driver pod found"
 
 
-VALID_ACTIONS = {"restart", "scale", "config_change", "code_fix", "no_action"}
+VALID_ACTIONS = {"restart", "scale", "increase_memory", "config_change", "code_fix", "no_action"}
 
 
 def analyze_failure(logs: str):
@@ -77,12 +77,27 @@ def analyze_failure(logs: str):
 {{
   "summary": "brief issue description",
   "root_cause": "...",
-  "recommended_action": "restart|scale|config_change|code_fix|no_action"
+  "recommended_action": "restart|scale|increase_memory|config_change|code_fix|no_action"
 }}
 
-For "scale", the executor count is computed by the actuator from the
-SparkApplication's current instances, not chosen by you — omit
-action_details.
+Action guide:
+- "scale": too few executors for the workload's parallelism (e.g. tasks
+  queued/pending, not enough resources to schedule work). Does NOT help a
+  per-task memory error — adding executors increases parallelism, not any
+  single executor's memory ceiling.
+- "increase_memory": a single executor ran out of memory for its own task
+  (OOMKilled, "Java heap space", "Container killed by YARN for exceeding
+  memory limits", GC overhead limit exceeded). This is the fix when the
+  failure is about one executor's memory being too small, not there being
+  too few of them.
+- "restart": transient/non-deterministic failure with no clear resource or
+  code cause.
+- "config_change" / "code_fix": the fix requires editing the job's source
+  code or a config file outside the SparkApplication's executor sizing.
+
+For "scale" and "increase_memory", the actual target value is computed by
+the actuator from the SparkApplication's current spec, not chosen by you —
+omit action_details.
 
 Logs:
 {logs[:7000]}"""
@@ -275,9 +290,18 @@ def apply_scale(app_name: str, namespace: str, decision: dict):
         print(f"Failed to scale via actuator: {e}")
 
 
+def apply_increase_memory(app_name: str, namespace: str, decision: dict):
+    try:
+        result = _call_actuator("/increase-memory", app_name, namespace)
+        print(f"Memory increase via actuator for {app_name}: {json.dumps(result)}")
+    except Exception as e:
+        print(f"Failed to increase memory via actuator: {e}")
+
+
 HEALING_ACTIONS = {
     "restart": apply_restart,
     "scale": apply_scale,
+    "increase_memory": apply_increase_memory,
 }
 
 
