@@ -14,6 +14,7 @@ where the app -> repo mapping also comes from server-side config, never the
 request payload.
 """
 
+import copy
 import os
 import time
 
@@ -57,6 +58,17 @@ def _check_namespace(namespace: str):
         raise HTTPException(403, f"actuator only operates in namespace '{SPARK_NAMESPACE}'")
 
 
+def _get_app(app_name: str):
+    try:
+        return custom.get_namespaced_custom_object(
+            SPARK_GROUP, SPARK_VERSION, SPARK_NAMESPACE, SPARK_PLURAL, app_name
+        )
+    except client.ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+
+
 def _parse_spark_memory_mb(value: str) -> int:
     """Spark memory strings: a bare number (bytes) or number + k/m/g/t
     suffix (case-insensitive), optionally with a trailing 'b'. Defaults to
@@ -76,6 +88,12 @@ def healthz():
 
 @app.post("/restart")
 def restart(req: ActionRequest):
+    """Delete-then-recreate, not just delete: a bare delete is terminal —
+    nothing resubmits a SparkApplication that no longer exists (Spark
+    Operator's own restartPolicy only resubmits a FAILED app that's still
+    present, and doesn't apply once the resource itself is gone). Capturing
+    the spec first and recreating it is what makes "restart" actually mean
+    restart instead of "delete and hope"."""
     _check_namespace(req.namespace)
     now = time.time()
     recent = [t for t in _restart_history.get(req.app_name, []) if now - t < RESTART_WINDOW_SECONDS]
@@ -85,12 +103,52 @@ def restart(req: ActionRequest):
             "reason": f"restart cap hit: {MAX_RESTARTS} in {RESTART_WINDOW_SECONDS}s window",
         }
 
+    current_app = _get_app(req.app_name)
+    if current_app is None:
+        raise HTTPException(404, f"{req.app_name} not found")
+
+    # Strip everything server-assigned (status, resourceVersion, uid,
+    # managedFields, ...) so the recreate is a clean fresh submission, not
+    # a stale copy of the old object fighting the API server over fields
+    # it no longer controls.
+    recreated = {
+        "apiVersion": current_app["apiVersion"],
+        "kind": current_app["kind"],
+        "metadata": {
+            "name": current_app["metadata"]["name"],
+            "namespace": current_app["metadata"]["namespace"],
+            "labels": current_app["metadata"].get("labels", {}),
+            "annotations": current_app["metadata"].get("annotations", {}),
+        },
+        "spec": copy.deepcopy(current_app["spec"]),
+    }
+
     try:
         custom.delete_namespaced_custom_object(
             SPARK_GROUP, SPARK_VERSION, SPARK_NAMESPACE, SPARK_PLURAL, req.app_name
         )
     except client.ApiException as e:
         raise HTTPException(e.status, f"delete failed: {e.reason}")
+
+    # Finalizers can hold the old object in a terminating state briefly;
+    # creating too early 409s against it. Bounded wait, not indefinite —
+    # the healing agent's own call to us times out at 30s.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if _get_app(req.app_name) is None:
+            break
+        time.sleep(0.5)
+    else:
+        raise HTTPException(
+            504, f"{req.app_name} still terminating after 15s — not recreated, retry later"
+        )
+
+    try:
+        custom.create_namespaced_custom_object(
+            SPARK_GROUP, SPARK_VERSION, SPARK_NAMESPACE, SPARK_PLURAL, recreated
+        )
+    except client.ApiException as e:
+        raise HTTPException(e.status, f"recreate failed (deleted but not resubmitted!): {e.reason}")
 
     recent.append(now)
     _restart_history[req.app_name] = recent

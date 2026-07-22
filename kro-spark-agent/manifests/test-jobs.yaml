@@ -15,6 +15,17 @@ spec:
   mainClass: org.example.DoesNotExist
   mainApplicationFile: local:///opt/spark/examples/jars/spark-examples_2.12-3.5.3.jar
   sparkVersion: "3.5.3"
+  # Spark Operator's own retry mechanism — this is what actually bounds
+  # "how many times and how far apart", independent of the healing agent's
+  # restart action (which acts on top of, not instead of, this). Without
+  # it, deleting the SparkApplication in the actuator's /restart is
+  # terminal: nothing resubmits it afterward.
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 180
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 180
   driver:
     cores: 1
     memory: 512m
@@ -41,6 +52,12 @@ spec:
   # than failing at startup. Exercises the "scale" remediation path.
   arguments: ["4", "5000", "1000000", "4"]
   sparkVersion: "3.5.3"
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 180
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 180
   driver:
     cores: 1
     memory: 512m

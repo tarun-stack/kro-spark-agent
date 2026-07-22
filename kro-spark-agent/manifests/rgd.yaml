@@ -80,7 +80,7 @@ spec:
         rules:
           - apiGroups: ["sparkoperator.k8s.io"]
             resources: ["sparkapplications", "sparkapplications/status"]
-            verbs: ["get", "list", "watch", "patch", "delete"]
+            verbs: ["get", "list", "watch", "patch", "delete", "create"]
 
     - id: actuatorRoleBinding
       template:
