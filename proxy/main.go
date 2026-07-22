@@ -52,6 +52,7 @@ var (
 	caKey    *ecdsa.PrivateKey
 	caCert   *x509.Certificate
 	caCertPEM []byte
+	upstreamRootCAs *x509.CertPool
 	certCache sync.Map
 )
 
@@ -84,6 +85,10 @@ func main() {
 
 	if err := loadCA(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load CA: %v\n", err)
+		os.Exit(1)
+	}
+	if err := loadUpstreamRoots(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load upstream root CAs: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -163,6 +168,26 @@ func loadCA() error {
 	}
 	caCert = cert
 
+	return nil
+}
+
+func loadUpstreamRoots() error {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+
+	if certFile := os.Getenv("SSL_CERT_FILE"); certFile != "" {
+		data, err := os.ReadFile(certFile)
+		if err != nil {
+			return fmt.Errorf("read SSL_CERT_FILE %s: %w", certFile, err)
+		}
+		if ok := pool.AppendCertsFromPEM(data); !ok {
+			return fmt.Errorf("append certificates from %s", certFile)
+		}
+	}
+
+	upstreamRootCAs = pool
 	return nil
 }
 
@@ -477,6 +502,7 @@ func credentialReplaceTLS(clientConn net.Conn, hostname string, origIP net.IP, o
 		fmt.Sprintf("%s:%d", hostname, origPort),
 		&tls.Config{
 			ServerName: hostname,
+			RootCAs:    upstreamRootCAs,
 			NextProtos: []string{"http/1.1"},
 		},
 	)

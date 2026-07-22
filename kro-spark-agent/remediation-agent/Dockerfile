@@ -1,5 +1,8 @@
 FROM python:3.11-slim
-
+COPY zscaler-root.crt /usr/local/share/ca-certificates/zscaler-root.crt
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 # git for checkouts, gh for PR creation. No Node/Claude Code CLI needed —
 # the code-fix step is a first-party OpenAI tool-calling loop (server.py),
 # not the Claude Agent SDK.
@@ -14,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --cert /etc/ssl/certs/ca-certificates.crt -r requirements.txt
 
 COPY server.py .
 

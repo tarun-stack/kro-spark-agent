@@ -5,7 +5,7 @@ metadata:
   namespace: kro-spark-agent
 spec:
   sparkNamespace: spark-jobs
-  pollIntervalSeconds: 60
+  pollIntervalSeconds: 180
   maxExecutors: 6
   maxRestarts: 3
   restartWindowSeconds: 3600

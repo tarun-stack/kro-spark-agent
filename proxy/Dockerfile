@@ -1,4 +1,8 @@
 FROM golang:1.22-bookworm AS builder
+COPY zscaler-root.crt /usr/local/share/ca-certificates/zscaler-root.crt
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
+    update-ca-certificates
 ARG GOPROXY=
 ENV GOPROXY=${GOPROXY}
 WORKDIR /app
@@ -8,8 +12,10 @@ COPY main.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /transparent-proxy .
 
 FROM debian:bookworm-slim
+COPY zscaler-root.crt /usr/local/share/ca-certificates/zscaler-root.crt
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl iptables ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -u 1337 -m -s /bin/false proxyuser

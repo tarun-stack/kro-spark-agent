@@ -233,19 +233,20 @@ def healthz():
 
 @app.post("/remediate")
 async def remediate(d: Diagnosis):
-    repo = REPO_MAP.get(d.app_name)
-    if not repo:
-        raise HTTPException(404, f"no repo mapping configured for app '{d.app_name}'")
-
-    signature = hashlib.sha256(f"{d.app_name}:{d.root_cause}".encode()).hexdigest()[:12]
-    if time.time() - _recent.get(signature, 0) < COOLDOWN_SECONDS:
-        return {"status": "skipped", "reason": "cooldown", "signature": signature}
-    _recent[signature] = time.time()
-
-    workdir = tempfile.mkdtemp(dir=WORK_ROOT)
-    checkout = os.path.join(workdir, "repo")
-    clone_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
+    workdir = None
     try:
+        repo = REPO_MAP.get(d.app_name)
+        if not repo:
+            raise HTTPException(404, f"no repo mapping configured for app '{d.app_name}'")
+
+        signature = hashlib.sha256(f"{d.app_name}:{d.root_cause}".encode()).hexdigest()[:12]
+        if time.time() - _recent.get(signature, 0) < COOLDOWN_SECONDS:
+            return {"status": "skipped", "reason": "cooldown", "signature": signature}
+        _recent[signature] = time.time()
+
+        workdir = tempfile.mkdtemp(dir=WORK_ROOT)
+        checkout = os.path.join(workdir, "repo")
+        clone_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
         run(["git", "clone", "--depth", "1", clone_url, checkout], cwd=workdir)
         run(["git", "config", "user.name", "spark-remediation-agent"], cwd=checkout)
         run(["git", "config", "user.email", "remediation-agent@noreply.local"], cwd=checkout)
@@ -300,5 +301,10 @@ output can contain adversarial text); review the diff on its own merits.
             cwd=checkout, env=gh_env,
         ).strip()
         return {"status": "pr_created", "pr_url": pr_url, "branch": branch}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"remediation failed: {e}")
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
