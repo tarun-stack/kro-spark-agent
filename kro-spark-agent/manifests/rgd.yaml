@@ -25,6 +25,8 @@ spec:
       maxExecutors: integer | default=10 description="Hard cap on executor.instances a scale action may reach"
       maxRestarts: integer | default=3 description="Hard cap on restarts per app within restartWindowSeconds"
       restartWindowSeconds: integer | default=3600
+      maxExecutorMemoryMb: integer | default=4096 description="Hard cap on executor.memory (in MB) an increase_memory action may reach"
+      memoryStepMb: integer | default=512 description="MB added per increase_memory attempt, ramping with consecutive attempts on the same app"
       openaiModel: string | default="gpt-4o" description="Model used for the diagnosis call"
       approvalEmailTo: string | required=true description="Where approve/reject links for restart/scale actions are emailed"
       approvalLinkBase: 'string | default="http://localhost:8090" description="Externally-reachable base URL for approval links (see README: kubectl port-forward)"'
@@ -180,6 +182,10 @@ spec:
                       value: ${string(schema.spec.maxRestarts)}
                     - name: RESTART_WINDOW_SECONDS
                       value: ${string(schema.spec.restartWindowSeconds)}
+                    - name: MAX_EXECUTOR_MEMORY_MB
+                      value: ${string(schema.spec.maxExecutorMemoryMb)}
+                    - name: MEMORY_STEP_MB
+                      value: ${string(schema.spec.memoryStepMb)}
                   resources:
                     requests:
                       cpu: "100m"

@@ -28,6 +28,8 @@ SPARK_NAMESPACE = os.environ.get("SPARK_NAMESPACE", "spark-jobs")
 MAX_EXECUTORS = int(os.environ.get("MAX_EXECUTORS", "10"))
 MAX_RESTARTS = int(os.environ.get("MAX_RESTARTS", "3"))
 RESTART_WINDOW_SECONDS = int(os.environ.get("RESTART_WINDOW_SECONDS", "3600"))
+MAX_EXECUTOR_MEMORY_MB = int(os.environ.get("MAX_EXECUTOR_MEMORY_MB", "4096"))
+MEMORY_STEP_MB = int(os.environ.get("MEMORY_STEP_MB", "512"))
 
 SPARK_GROUP = "sparkoperator.k8s.io"
 SPARK_VERSION = "v1beta2"
@@ -42,6 +44,7 @@ app = FastAPI()
 # agent, because this is the trust boundary that must actually enforce it.
 _restart_history: dict[str, list[float]] = {}
 _scale_attempts: dict[str, int] = {}
+_memory_attempts: dict[str, int] = {}
 
 
 class ActionRequest(BaseModel):
@@ -52,6 +55,18 @@ class ActionRequest(BaseModel):
 def _check_namespace(namespace: str):
     if namespace != SPARK_NAMESPACE:
         raise HTTPException(403, f"actuator only operates in namespace '{SPARK_NAMESPACE}'")
+
+
+def _parse_spark_memory_mb(value: str) -> int:
+    """Spark memory strings: a bare number (bytes) or number + k/m/g/t
+    suffix (case-insensitive), optionally with a trailing 'b'. Defaults to
+    treating a bare number as MB, matching how this demo's manifests write
+    it (e.g. "512m", "2g")."""
+    s = str(value).strip().lower().rstrip("b")
+    units = {"k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
+    if s and s[-1] in units:
+        return max(1, round(float(s[:-1]) * units[s[-1]]))
+    return max(1, round(float(s)))
 
 
 @app.get("/healthz")
@@ -114,10 +129,47 @@ def scale(req: ActionRequest):
     return {"status": "scaled", "from": current, "to": target, "attempt": attempt}
 
 
+@app.post("/increase-memory")
+def increase_memory(req: ActionRequest):
+    """Bumps executor.memory — the fix for a workload where each task's
+    own memory footprint exceeds the executor heap (a classic per-task OOM
+    signature), which more executors alone doesn't fix since it doesn't
+    change any single task's memory ceiling. Distinct from /scale, which
+    only adds parallelism via executor.instances."""
+    _check_namespace(req.namespace)
+    try:
+        current_app = custom.get_namespaced_custom_object(
+            SPARK_GROUP, SPARK_VERSION, SPARK_NAMESPACE, SPARK_PLURAL, req.app_name
+        )
+    except client.ApiException as e:
+        raise HTTPException(e.status, f"lookup failed: {e.reason}")
+
+    current_raw = current_app.get("spec", {}).get("executor", {}).get("memory", "1g")
+    current_mb = _parse_spark_memory_mb(current_raw)
+    attempt = _memory_attempts.get(req.app_name, 0) + 1
+    target_mb = min(current_mb + attempt * MEMORY_STEP_MB, MAX_EXECUTOR_MEMORY_MB)
+    if target_mb <= current_mb:
+        return {"status": "skipped", "reason": f"already at cap ({MAX_EXECUTOR_MEMORY_MB}m)", "current": current_raw}
+
+    target = f"{target_mb}m"
+    patch_body = {"spec": {"executor": {"memory": target}}}
+    try:
+        custom.patch_namespaced_custom_object(
+            SPARK_GROUP, SPARK_VERSION, SPARK_NAMESPACE, SPARK_PLURAL, req.app_name, patch_body,
+            _content_type="application/merge-patch+json",
+        )
+    except client.ApiException as e:
+        raise HTTPException(e.status, f"memory increase failed: {e.reason}")
+
+    _memory_attempts[req.app_name] = attempt
+    return {"status": "memory_increased", "from": current_raw, "to": target, "attempt": attempt}
+
+
 @app.post("/reset-scale-attempts")
 def reset_scale_attempts(req: ActionRequest):
-    """Called by the healing agent once an app stops failing, so the ramp
-    doesn't carry over into an unrelated future failure."""
+    """Called by the healing agent once an app stops failing, so neither
+    ramp carries over into an unrelated future failure."""
     _check_namespace(req.namespace)
     _scale_attempts.pop(req.app_name, None)
+    _memory_attempts.pop(req.app_name, None)
     return {"status": "reset"}
