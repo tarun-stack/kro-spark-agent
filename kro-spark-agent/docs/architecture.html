@@ -1,0 +1,356 @@
+<title>kro-spark-agent — Architecture</title>
+<style>
+  :root {
+    --paper: #eef2f1;
+    --ink: #10181a;
+    --ink-soft: #3d4b4d;
+    --line: #c7d2d0;
+    --panel: #ffffff;
+    --accent: #1f8f82;
+    --accent-soft: #e2f2ef;
+    --warn: #b5651d;
+    --warn-soft: #f7e9dd;
+    --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0e1416;
+      --ink: #e7eeed;
+      --ink-soft: #9fb0ae;
+      --line: #26333333;
+      --line: #2b3a3a;
+      --panel: #141d1f;
+      --accent: #5fc9bd;
+      --accent-soft: #17302c;
+      --warn: #e0a35c;
+      --warn-soft: #33261a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0e1416;
+    --ink: #e7eeed;
+    --ink-soft: #9fb0ae;
+    --line: #2b3a3a;
+    --panel: #141d1f;
+    --accent: #5fc9bd;
+    --accent-soft: #17302c;
+    --warn: #e0a35c;
+    --warn-soft: #33261a;
+  }
+  :root[data-theme="light"] {
+    --paper: #eef2f1;
+    --ink: #10181a;
+    --ink-soft: #3d4b4d;
+    --line: #c7d2d0;
+    --panel: #ffffff;
+    --accent: #1f8f82;
+    --accent-soft: #e2f2ef;
+    --warn: #b5651d;
+    --warn-soft: #f7e9dd;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 3.5rem 2rem 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2.5rem;
+  }
+
+  header.masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 2rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  h1 {
+    margin: 0;
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: clamp(1.7rem, 3vw, 2.35rem);
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+
+  .dek {
+    margin: 0;
+    max-width: 62ch;
+    font-size: 1.02rem;
+    line-height: 1.6;
+    color: var(--ink-soft);
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 0.4rem;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.02em;
+    padding: 0.32rem 0.7rem 0.32rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--ink-soft);
+    background: var(--panel);
+  }
+  .chip .dot { width: 0.55rem; height: 0.55rem; border-radius: 999px; flex: none; }
+  .dot.readonly { background: #5fc9bd; }
+  .dot.writeonly { background: #e0a35c; }
+  .dot.notrust { background: #8a97a3; }
+  .dot.ext { background: #4a5b63; }
+
+  section h2 {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0 0 1rem;
+  }
+
+  .sheet {
+    background: #0c1116;
+    border-radius: 14px;
+    padding: 1.75rem;
+    overflow-x: auto;
+    border: 1px solid #1c2528;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+  }
+  .sheet pre.mermaid { margin: 0; min-width: 920px; }
+  .sheet-caption {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    margin-top: 0.65rem;
+    letter-spacing: 0.02em;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1rem;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .card .tag {
+    align-self: flex-start;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 5px;
+  }
+  .tag.readonly { color: #0d5c53; background: var(--accent-soft); }
+  :root[data-theme="dark"] .tag.readonly, @media (prefers-color-scheme: dark) { }
+  .tag.writeonly { color: #7a4413; background: var(--warn-soft); }
+  .tag.notrust { color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); }
+
+  .card h3 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 0.96rem;
+  }
+  .card p {
+    margin: 0;
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .card code {
+    font-family: var(--mono);
+    font-size: 0.82em;
+    background: var(--paper);
+    padding: 0.05rem 0.35rem;
+    border-radius: 4px;
+  }
+
+  .notes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .notes .note {
+    display: flex;
+    gap: 0.8rem;
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: var(--ink-soft);
+  }
+  .notes .note strong { color: var(--ink); font-weight: 600; }
+  .notes .note .glyph {
+    font-family: var(--mono);
+    color: var(--accent);
+    flex: none;
+    width: 1.2rem;
+  }
+
+  footer {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--line);
+    padding-top: 1.25rem;
+  }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 2.25rem 1.1rem 3.5rem; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">kro-spark-agent · deployed topology</div>
+    <h1>One CR, three trust tiers, five hops out of the cluster</h1>
+    <p class="dek">
+      How <code style="font-family:var(--mono)">spark-healer</code> actually sits inside
+      <code style="font-family:var(--mono)">kind-claude-demo</code>: what watches what,
+      who is allowed to mutate a <code style="font-family:var(--mono)">SparkApplication</code>,
+      and every place the sandbox talks to the outside world.
+    </p>
+    <div class="legend">
+      <span class="chip"><span class="dot readonly"></span>read-only RBAC</span>
+      <span class="chip"><span class="dot writeonly"></span>write RBAC (sole holder)</span>
+      <span class="chip"><span class="dot notrust"></span>zero cluster credentials</span>
+      <span class="chip"><span class="dot ext"></span>outside the cluster</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Topology</h2>
+    <div class="sheet">
+<pre class="mermaid">
+flowchart TB
+    classDef readonly fill:#0c1116,stroke:#5fc9bd,color:#cdeee8,stroke-width:1.6px
+    classDef writeonly fill:#0c1116,stroke:#e0a35c,color:#f6dcb8,stroke-width:1.6px
+    classDef notrust fill:#0c1116,stroke:#7c8a94,color:#b7c2ca,stroke-width:1.4px,stroke-dasharray:3 3
+    classDef ext fill:#161f23,stroke:#3d4b53,color:#c9d3d8
+    classDef human fill:#161f23,stroke:#e0a35c,color:#f6dcb8
+
+    subgraph EXT["EXTERNAL SERVICES"]
+        direction LR
+        OPENAI["OpenAI API<br/>api.openai.com"]:::ext
+        GH["GitHub<br/>tarun-stack/ai-poc"]:::ext
+        SMTP["Gmail SMTP<br/>smtp.gmail.com:587"]:::ext
+        HUMAN["Human<br/>email inbox"]:::human
+    end
+
+    subgraph CLUSTER["KIND CLUSTER · claude-demo"]
+        subgraph KROSYS["kro-system"]
+            KRO["KRO controller<br/>watches SparkHealingAgent CR"]:::notrust
+        end
+
+        subgraph SPARKJOBS["spark-jobs namespace"]
+            SPARKOP["Spark Operator<br/>controller + webhook"]:::notrust
+            SPARKAPP["SparkApplication<br/>FAILED → RUNNING"]:::ext
+            DRIVER["driver / executor pods"]:::ext
+        end
+
+        subgraph AGENTNS["kro-spark-agent namespace"]
+            subgraph HEALERPOD["healer Pod (2 containers)"]
+                HEALER["healing-agent<br/>RBAC: read-only<br/>pods/log, sparkapps: get·list·watch"]:::readonly
+                PROXY["proxy-sidecar<br/>all egress iptables-redirected<br/>credential-replace → openai only<br/>passthrough → everything else"]:::readonly
+            end
+            ACTUATOR["actuator<br/>RBAC: write<br/>sparkapps: patch·delete<br/>+ restart/scale rate limits"]:::writeonly
+            REMED["remediation-agent<br/>automountServiceAccountToken: false<br/>zero cluster credentials"]:::notrust
+            APPROVALSVC["approval Service :8090"]:::readonly
+        end
+    end
+
+    SPARKOP -->|watches, manages| SPARKAPP
+    SPARKAPP --> DRIVER
+    HEALER -->|list/watch, read logs| SPARKAPP
+    HEALER --> PROXY
+    PROXY -->|credential-replace| OPENAI
+    HEALER -->|POST /restart, /scale| ACTUATOR
+    ACTUATOR -->|patch, delete| SPARKAPP
+    HEALER -->|approve/reject link| SMTP
+    SMTP --> HUMAN
+    HUMAN -->|clicks approve| APPROVALSVC --> HEALER
+    HEALER -->|POST /remediate: code_fix| REMED
+    REMED -->|clone, edit, push, open PR| GH
+    KRO -.generates.-> HEALERPOD
+    KRO -.generates.-> ACTUATOR
+    KRO -.generates.-> REMED
+    KRO -.generates.-> APPROVALSVC
+</pre>
+    </div>
+    <div class="sheet-caption">solid arrow = live call this run &nbsp;·&nbsp; dotted arrow = generated once by KRO, not a runtime call</div>
+  </section>
+
+  <section>
+    <h2>Who can do what</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="tag readonly">read-only</span>
+        <h3>healing-agent</h3>
+        <p>Watches <code>SparkApplication</code> status, reads driver logs, asks OpenAI to diagnose a failure. Cannot patch or delete anything — every action is a proposal sent elsewhere.</p>
+      </div>
+      <div class="card">
+        <span class="tag writeonly">write, sole holder</span>
+        <h3>actuator</h3>
+        <p>The only identity in the system with <code>patch</code>/<code>delete</code> on SparkApplications. Re-derives executor counts and restart history itself rather than trusting the caller's numbers.</p>
+      </div>
+      <div class="card">
+        <span class="tag notrust">zero credentials</span>
+        <h3>remediation-agent</h3>
+        <p>Edits a cloned repo with an OpenAI tool-calling loop, confined to the checkout. <code>automountServiceAccountToken: false</code> — no Kubernetes API access at all.</p>
+      </div>
+      <div class="card">
+        <span class="tag readonly">read-only</span>
+        <h3>proxy-sidecar</h3>
+        <p>All egress from the healer Pod is iptables-redirected here. Only <code>api.openai.com</code> gets the real key injected; the Kubernetes API, the actuator, and SMTP pass through untouched.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reading the boundaries</h2>
+    <div class="notes">
+      <div class="note"><span class="glyph">→</span><span><strong>Diagnose vs. act.</strong> The healing agent can see everything and change nothing; the actuator can change one thing (SparkApplications in <code style="font-family:var(--mono)">spark-jobs</code>) and see nothing else. Verified live: <code style="font-family:var(--mono)">kubectl auth can-i delete sparkapplications --as=healer</code> → no, <code style="font-family:var(--mono)">--as=actuator</code> → yes.</span></div>
+      <div class="note"><span class="glyph">→</span><span><strong>A human is the approval gate, twice over.</strong> Restart/scale needs a clicked email link; a code fix needs a merged PR. Neither path can complete itself.</span></div>
+      <div class="note"><span class="glyph">→</span><span><strong>The proxy's job is narrower than it looks.</strong> It only ever protects one secret — the OpenAI key. Everything else crossing that sidecar (Kubernetes API calls, actuator calls, SMTP) is passed through in the clear, because none of it presents a hostname the proxy can act on the way HTTPS does.</span></div>
+    </div>
+  </section>
+
+  <footer>kind-claude-demo · namespaces: kro-system, spark-jobs, kro-spark-agent · generated from manifests/rgd.yaml</footer>
+
+</div>

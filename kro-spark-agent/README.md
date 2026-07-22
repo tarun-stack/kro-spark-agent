@@ -6,6 +6,10 @@ concepts: a KRO `ResourceGraphDefinition` (concept 06) that generates the whole
 system from one CR, and the transparent credential proxy (concept 03/`proxy/`)
 for the agent's one external API call.
 
+See [`docs/architecture.html`](docs/architecture.html) for a diagram of the
+deployed topology (trust tiers, RBAC boundaries, every hop out of the
+cluster) — open it in a browser.
+
 ## Concept Summary
 
 A `SparkApplication` fails. A **healing agent** (read-only Kubernetes RBAC) notices,
@@ -70,8 +74,6 @@ flowchart TD
 | Real `OPENAI_API_KEY` in the healing-agent container | `proxy/` sidecar injects it; container only ever sees `FAKE_KEY_REPLACED_BY_PROXY` | Reuses concept 03's transparent credential proxy instead of trusting the app container with the real key |
 | SMTP creds, actuator calls, Kubernetes API calls | Left un-intercepted (`proxy.mode: allow-everything`, only `api.openai.com` is credential-replaced) | The proxy can only match a hostname via TLS SNI or an HTTP Host header — SMTP (STARTTLS), the in-cluster actuator Service, and the in-cluster Kubernetes API don't present one the same way an external HTTPS API does. `NetworkPolicy` + RBAC are the real boundary for those, not the proxy allowlist |
 | `remediation-agent/` (Claude Agent SDK, opens PR) | Rewritten to use a first-party OpenAI tool-calling loop instead | Claude Agent SDK is Anthropic-only; keeping one LLM backend (OpenAI) across the whole system avoids depending on two separate provider accounts. Still `automountServiceAccountToken: false`, still zero cluster credentials, still deterministic git/PR mechanics outside the model |
-
-Both the healing-agent container and the proxy sidecar mount the same `/certs` volume. The healer uses `NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt` and `SSL_CERT_FILE=/certs/combined-ca.crt`, while the proxy sidecar now uses `SSL_CERT_FILE=/certs/combined-ca.crt` too so its upstream TLS dial can verify `api.openai.com` through the same corporate root bundle.
 
 ## What KRO Generates
 
