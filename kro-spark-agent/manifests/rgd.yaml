@@ -307,6 +307,8 @@ spec:
                   env:
                     - name: PROXY_PORT
                       value: "15001"
+                    - name: SSL_CERT_FILE
+                      value: "/certs/combined-ca.crt"
                     - name: OPENAI_API_KEY
                       valueFrom:
                         secretKeyRef:
@@ -350,7 +352,10 @@ spec:
                     - name: PYTHONUNBUFFERED
                       value: "1"
                     - name: OPENAI_API_KEY
-                      value: "FAKE_KEY_REPLACED_BY_PROXY"
+                      valueFrom:
+                        secretKeyRef:
+                          name: healing-agent-credentials
+                          key: OPENAI_API_KEY
                     - name: NODE_EXTRA_CA_CERTS
                       value: "/certs/proxy-ca.crt"
                     - name: SSL_CERT_FILE

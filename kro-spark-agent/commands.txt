@@ -37,7 +37,7 @@ kubectl config current-context   # should print: kind-claude-demo
 2. INSTALL KRO (the ResourceGraphDefinition controller)
 --------------------------------------------------------------------------
 helm install kro oci://registry.k8s.io/kro/charts/kro \
-  --namespace kro-system --create-namespace
+  --namespace kro-system --create-namespace --insecure-skip-tls-verify
 kubectl wait --for=condition=Available deploy -n kro-system --all --timeout=90s
 kubectl get pods -n kro-system
 
@@ -116,9 +116,9 @@ kubectl get crd sparkhealingagents.kro.run
 
 kubectl create secret generic healing-agent-credentials \
   -n kro-spark-agent \
-  --from-literal=OPENAI_API_KEY=<YOUR_OPENAI_API_KEY> \
-  --from-literal=SMTP_USER=<YOUR_GMAIL_ADDRESS> \
-  --from-literal=SMTP_PASSWORD=<YOUR_GMAIL_APP_PASSWORD_NO_SPACES>
+  --from-literal=OPENAI_API_KEY=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 \
+  --from-literal=SMTP_USER=tarunximb33@gmail.com \
+  --from-literal=SMTP_PASSWORD="lxdz qbbu jvta bthq"
 
 # remediation-credentials: only needed if spec.remediation.enabled: true.
 # GITHUB_TOKEN must be a fine-grained PAT scoped to ONLY
@@ -128,8 +128,8 @@ kubectl create secret generic healing-agent-credentials \
 
 kubectl create secret generic remediation-credentials \
   -n kro-spark-agent \
-  --from-literal=OPENAI_API_KEY=<YOUR_OPENAI_API_KEY> \
-  --from-literal=GITHUB_TOKEN=<YOUR_FINE_GRAINED_GITHUB_PAT>
+  --from-literal=OPENAI_API_KEY=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 \
+  --from-literal=GITHUB_TOKEN=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
 
 
 --------------------------------------------------------------------------

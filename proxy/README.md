@@ -38,6 +38,8 @@ The proxy runs as a Kubernetes sidecar alongside iptables init containers:
 
 ## Operating Modes
 
+If your environment uses a corporate TLS-inspection CA, the proxy image itself must trust that CA as well. This repo bakes `zscaler-root.crt` into the image's system CA store, and the proxy-sidecar also reads the mounted `/certs/combined-ca.crt` via `SSL_CERT_FILE` for upstream verification.
+
 | Mode | Listed domains | Detected but unlisted | Undetectable (SSH, SQL) |
 |------|---------------|----------------------|------------------------|
 | **strict** (default) | credential-replace / passthrough | BLOCKED | BLOCKED |
@@ -155,6 +157,8 @@ initContainers:
     env:
       - name: PROXY_PORT
         value: "15001"
+      - name: SSL_CERT_FILE
+        value: "/certs/combined-ca.crt"
       - name: ANTHROPIC_API_KEY
         valueFrom:
           secretKeyRef:

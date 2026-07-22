@@ -241,8 +241,12 @@ def hand_off_to_remediation(app_name: str, namespace: str, decision: dict, logs:
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with request.urlopen(req, timeout=600) as resp:
-        return json.loads(resp.read())
+    try:
+        with request.urlopen(req, timeout=600) as resp:
+            return json.loads(resp.read())
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"remediation returned HTTP {exc.code}: {body}")
 
 
 def _call_actuator(path: str, app_name: str, namespace: str):

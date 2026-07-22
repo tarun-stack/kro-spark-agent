@@ -69,6 +69,8 @@ flowchart TD
 | SMTP creds, actuator calls, Kubernetes API calls | Left un-intercepted (`proxy.mode: allow-everything`, only `api.openai.com` is credential-replaced) | The proxy can only match a hostname via TLS SNI or an HTTP Host header — SMTP (STARTTLS), the in-cluster actuator Service, and the in-cluster Kubernetes API don't present one the same way an external HTTPS API does. `NetworkPolicy` + RBAC are the real boundary for those, not the proxy allowlist |
 | `remediation-agent/` (Claude Agent SDK, opens PR) | Rewritten to use a first-party OpenAI tool-calling loop instead | Claude Agent SDK is Anthropic-only; keeping one LLM backend (OpenAI) across the whole system avoids depending on two separate provider accounts. Still `automountServiceAccountToken: false`, still zero cluster credentials, still deterministic git/PR mechanics outside the model |
 
+Both the healing-agent container and the proxy sidecar mount the same `/certs` volume. The healer uses `NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt` and `SSL_CERT_FILE=/certs/combined-ca.crt`, while the proxy sidecar now uses `SSL_CERT_FILE=/certs/combined-ca.crt` too so its upstream TLS dial can verify `api.openai.com` through the same corporate root bundle.
+
 ## What KRO Generates
 
 From one `SparkHealingAgent` instance, KRO creates (remediation resources only when `spec.remediation.enabled: true`):
